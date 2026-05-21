@@ -1,0 +1,44 @@
+{
+  "name": "@srah/ollama-image-mcp",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/srah/ollama-image-mcp.git"
+  },
+  "version": "1.0.0",
+  "description": "MCP server for local image generation via Ollama (flux, z-image-turbo, etc.)",
+  "type": "module",
+  "bin": {
+    "ollama-image-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "mcp",
+    "ollama",
+    "image-generation",
+    "flux",
+    "ai",
+    "local-ai"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
