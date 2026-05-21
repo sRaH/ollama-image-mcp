@@ -1,0 +1,5 @@
+{
+  "skills": [
+    { "name": "ollama-image", "files": ["SKILL.md"] }
+  ]
+}
