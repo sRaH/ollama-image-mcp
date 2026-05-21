@@ -7,11 +7,11 @@
     "type": "git",
     "url": "git+https://github.com/srah/ollama-image-mcp.git"
   },
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server for local image generation via Ollama (flux, z-image-turbo, etc.)",
   "type": "module",
   "bin": {
-    "ollama-image-mcp": "./dist/index.js"
+    "ollama-image-mcp": "dist/index.js"
   },
   "files": [
     "dist/"
