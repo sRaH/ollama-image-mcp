@@ -111,7 +111,7 @@ function isImageModel(modelName: string): boolean {
 }
 
 function getDefaultOutputDir(): string {
-  return join(homedir(), ".ollama-image-mcp");
+  return join(process.cwd(), ".ollama-images");
 }
 
 async function saveBase64Image(
@@ -129,6 +129,109 @@ async function saveBase64Image(
 
   return filePath;
 }
+
+interface ImageJob {
+  id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  prompt: string;
+  model: string;
+  width: number;
+  height: number;
+  steps: number;
+  seed?: number;
+  outputDir: string;
+  fileName: string;
+  createdAt: number;
+  completedAt?: number;
+  filePath?: string;
+  fileSize?: number;
+  duration?: number;
+  error?: string;
+  base64?: string;
+}
+
+const jobs = new Map<string, ImageJob>();
+
+function startJob(params: {
+  prompt: string;
+  model: string;
+  width: number;
+  height: number;
+  steps: number;
+  seed?: number;
+  outputDir: string;
+  fileName: string;
+}): ImageJob {
+  const job: ImageJob = {
+    id: randomUUID().slice(0, 8),
+    status: "pending",
+    createdAt: Date.now(),
+    ...params,
+  };
+  jobs.set(job.id, job);
+
+  runJob(job).catch((err) => {
+    job.status = "failed";
+    job.error = err instanceof Error ? err.message : String(err);
+    job.completedAt = Date.now();
+    process.stderr.write(
+      `[ollama-image-mcp] Job ${job.id} failed: ${job.error}\n`,
+    );
+  });
+
+  return job;
+}
+
+async function runJob(job: ImageJob): Promise<void> {
+  job.status = "running";
+  process.stderr.write(
+    `[ollama-image-mcp] Job ${job.id} started: "${job.prompt.slice(0, 80)}"\n`,
+  );
+
+  const response = await ollamaGenerate({
+    model: job.model,
+    prompt: job.prompt,
+    width: job.width,
+    height: job.height,
+    steps: job.steps,
+    seed: job.seed,
+  });
+
+  if (!response.image) {
+    throw new Error(
+      `Model "${job.model}" did not return image data. Not an image generation model.`,
+    );
+  }
+
+  const filePath = await saveBase64Image(response.image, job.outputDir!, job.fileName!);
+
+  job.status = "completed";
+  job.completedAt = Date.now();
+  job.filePath = filePath;
+  job.fileSize = Buffer.from(
+    response.image.replace(/^data:image\/\w+;base64,/, ""),
+    "base64",
+  ).length;
+  job.duration = response.total_duration
+    ? Math.round(response.total_duration / 1e9)
+    : undefined;
+  job.base64 = response.image.replace(/^data:image\/\w+;base64,/, "");
+
+  process.stderr.write(
+    `[ollama-image-mcp] Job ${job.id} completed: ${filePath} (${job.fileSize.toLocaleString()} bytes)\n`,
+  );
+}
+
+const ONE_HOUR_MS = 3600000;
+
+setInterval(() => {
+  const cutoff = Date.now() - ONE_HOUR_MS;
+  for (const [id, job] of jobs) {
+    if (job.completedAt && job.completedAt < cutoff) {
+      jobs.delete(id);
+    }
+  }
+}, 300000).unref();
 
 const GenerateImageSchema = z.object({
   prompt: z.string().describe("The image generation prompt"),
@@ -160,7 +263,7 @@ const GenerateImageSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Directory to save the generated image. Defaults to ~/.ollama-image-mcp/",
+      "Directory to save the generated image. Defaults to .ollama-images/ in the current working directory.",
     ),
   file_name: z
     .string()
@@ -168,6 +271,10 @@ const GenerateImageSchema = z.object({
     .describe(
       "Custom file name (without extension). Defaults to auto-generated name.",
     ),
+});
+
+const GetImageSchema = z.object({
+  job_id: z.string().describe("The job ID returned by generate_image"),
 });
 
 const ListModelsSchema = z.object({
@@ -197,7 +304,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "generate_image",
       description: [
         "Generate an image using a local Ollama image generation model (e.g. x/flux2-klein, x/z-image-turbo).",
-        "The image is saved to disk as a PNG file and the file path is returned.",
+        "Returns a job ID immediately. Use get_image to check status and retrieve the result.",
         "Requires Ollama to be running locally with an image generation model pulled.",
       ].join(" "),
       inputSchema: {
@@ -229,7 +336,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           output_dir: {
             type: "string",
-            description: "Directory to save the image (default: ~/.ollama-image-mcp/)",
+            description: "Directory to save the image (default: .ollama-images/ in cwd)",
           },
           file_name: {
             type: "string",
@@ -237,6 +344,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ["prompt"],
+      },
+    },
+    {
+      name: "get_image",
+      description: [
+        "Check the status of an image generation job and retrieve the result.",
+        "Returns job status, and if completed, the file path and inline image data.",
+      ].join(" "),
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          job_id: {
+            type: "string",
+            description: "The job ID returned by generate_image",
+          },
+        },
+        required: ["job_id"],
       },
     },
     {
@@ -295,80 +419,124 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ? `${file_name}.png`
         : `image-${Date.now()}-${randomUUID().slice(0, 8)}.png`;
 
-      try {
-        const response = await ollamaGenerate({
-          model,
-          prompt,
-          width,
-          height,
-          steps,
-          seed,
-        });
+      const job = startJob({
+        prompt,
+        model,
+        width,
+        height,
+        steps,
+        seed,
+        outputDir,
+        fileName,
+      });
 
-        if (!response.image) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: [
-                  `Model "${model}" did not return image data.`,
-                  `This usually means the model is not an image generation model.`,
-                  `Try one of: x/flux2-klein, x/z-image-turbo`,
-                  "",
-                  `Model response: ${response.response?.slice(0, 200) || "(empty)"}`,
-                ].join("\n"),
-              },
-            ],
-            isError: true,
-          };
-        }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: [
+              `Image generation started!`,
+              ``,
+              `  Job ID:  ${job.id}`,
+              `  Model:   ${model}`,
+              `  Prompt:  ${prompt}`,
+              `  Size:    ${width}x${height}`,
+              ``,
+              `Use get_image with job_id="${job.id}" to check status and retrieve the result.`,
+            ].join("\n"),
+          },
+        ],
+      };
+    }
 
-        const filePath = await saveBase64Image(
-          response.image,
-          outputDir,
-          fileName,
-        );
-
-        const sizeBytes = Buffer.from(
-          response.image.replace(/^data:image\/\w+;base64,/, ""),
-          "base64",
-        ).length;
-
+    case "get_image": {
+      const parsed = GetImageSchema.safeParse(args);
+      if (!parsed.success) {
         return {
           content: [
             {
               type: "text" as const,
-              text: [
-                `Image generated successfully!`,
-                ``,
-                `  Model:   ${model}`,
-                `  Prompt:  ${prompt}`,
-                `  Size:    ${width}x${height}`,
-                `  Steps:   ${steps || "default"}`,
-                `  File:    ${filePath}`,
-                `  Bytes:   ${sizeBytes.toLocaleString()}`,
-                `  Time:    ${response.total_duration ? `${Math.round(response.total_duration / 1e9)}s` : "unknown"}`,
-              ].join("\n"),
-            },
-            {
-              type: "image" as const,
-              data: response.image.replace(/^data:image\/\w+;base64,/, ""),
-              mimeType: "image/png",
-            },
-          ],
-        };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Failed to generate image: ${message}`,
+              text: `Invalid arguments: ${parsed.error.message}`,
             },
           ],
           isError: true,
         };
       }
+
+      const { job_id } = parsed.data;
+      const job = jobs.get(job_id);
+
+      if (!job) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Job "${job_id}" not found. It may have expired (jobs are cleaned up after 1 hour).`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      if (job.status === "pending" || job.status === "running") {
+        const elapsed = Math.round((Date.now() - job.createdAt) / 1000);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: [
+                `Job ${job.id} is ${job.status}...`,
+                `  Elapsed: ${elapsed}s`,
+                `  Prompt:  ${job.prompt}`,
+                ``,
+                `Try again in a few seconds.`,
+              ].join("\n"),
+            },
+          ],
+        };
+      }
+
+      if (job.status === "failed") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: [
+                `Job ${job.id} failed:`,
+                `  Error: ${job.error}`,
+              ].join("\n"),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [
+        {
+          type: "text",
+          text: [
+            `Job ${job.id} completed!`,
+            ``,
+            `  Model:   ${job.model}`,
+            `  Prompt:  ${job.prompt}`,
+            `  Size:    ${job.width}x${job.height}`,
+            `  Steps:   ${job.steps || "default"}`,
+            `  File:    ${job.filePath}`,
+            `  Bytes:   ${job.fileSize?.toLocaleString()}`,
+            `  Time:    ${job.duration ? `${job.duration}s` : "unknown"}`,
+          ].join("\n"),
+        },
+      ];
+
+      if (job.base64) {
+        content.push({
+          type: "image",
+          data: job.base64,
+          mimeType: "image/png",
+        });
+      }
+
+      return { content };
     }
 
     case "list_image_models": {

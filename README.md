@@ -6,7 +6,8 @@ MCP server for local image generation via [Ollama](https://ollama.com). Uses mod
 
 | Tool | Description |
 |------|-------------|
-| `generate_image` | Generate an image from a text prompt, save as PNG |
+| `generate_image` | Generate an image from a text prompt (async, returns job ID) |
+| `get_image` | Check job status and retrieve the completed image |
 | `list_image_models` | List locally available image generation models |
 
 ## Prerequisites
@@ -27,12 +28,13 @@ Add to your `opencode.json` or `.opencode/opencode.jsonc`:
 
 ```jsonc
 {
-  "mcp": [
-    {
-      "command": "npx",
-      "args": ["-y", "ollama-image-mcp@latest"]
+  "mcp": {
+    "ollama-image": {
+      "type": "local",
+      "command": ["npx", "-y", "@srah/ollama-image-mcp@latest"],
+      "timeout": 1800000
     }
-  ]
+  }
 }
 ```
 
